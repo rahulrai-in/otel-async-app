@@ -8,19 +8,19 @@ using OpenTelemetry.Trace;
 
 // Define attributes for your application
 var resourceBuilder = ResourceBuilder.CreateDefault()
-    // add attributes for the name and version of the service
+    // Add attributes for the name and version of the service
     .AddService("MyCompany.AsyncApp.Receiver", serviceVersion: "1.0.0")
-    // add attributes for the OpenTelemetry SDK version
+    // Add attributes for the OpenTelemetry SDK version
     .AddTelemetrySdk();
 
 // Configure tracing
 using var tracerProvider = Sdk.CreateTracerProviderBuilder()
     .SetResourceBuilder(resourceBuilder)
-    // receive traces from our own custom sources
+    // Receive traces from our own custom sources
     .AddSource("Receiver")
-    // ensures that all spans are recorded and sent to exporter
+    // Ensures that all spans are recorded and sent to exporter
     .SetSampler(new AlwaysOnSampler())
-    // stream traces to the SpanExporter
+    // Stream traces to the SpanExporter
     .AddProcessor(
         new BatchActivityExportProcessor(
             new JaegerExporter(new() { Protocol = JaegerExportProtocol.HttpBinaryThrift })))
@@ -28,23 +28,24 @@ using var tracerProvider = Sdk.CreateTracerProviderBuilder()
 
 var tracer = TracerProvider.Default.GetTracer("Receiver");
 
-await using var client = new ServiceBusClient("<namespace-name>.servicebus.windows.net", new DefaultAzureCredential());
-await using var processor = client.CreateProcessor("<queue-name>");
+await using var client = new ServiceBusClient("asyncservice.servicebus.windows.net", new DefaultAzureCredential());
+await using var processor = client.CreateProcessor("messages");
 
 processor.ProcessMessageAsync += ProcessMessageAsync;
 processor.ProcessErrorAsync += ProcessErrorAsync;
 
-await processor.StartProcessingAsync().ConfigureAwait(false);
+await processor.StartProcessingAsync();
 
 Console.WriteLine("Press any key to end the processing");
 Console.ReadKey();
 
 Console.WriteLine("\nStopping the receiver...");
-await processor.StopProcessingAsync().ConfigureAwait(false);
+await processor.StopProcessingAsync();
 Console.WriteLine("Stopped receiving messages");
 
 async Task ProcessMessageAsync(ProcessMessageEventArgs args)
 {
+    // Use the Propagator to extract the context from message properties
     var parentContext = Propagators.DefaultTextMapPropagator.Extract(default, args.Message.ApplicationProperties,
         (qProps, key) =>
         {
@@ -56,11 +57,14 @@ async Task ProcessMessageAsync(ProcessMessageEventArgs args)
             return new[] { value.ToString() };
         });
 
+    // Create a new span as a child of the propagated parent span
     using var span = tracer.StartActiveSpan("Receive message", SpanKind.Consumer,
         new SpanContext(parentContext.ActivityContext));
 
+    // Copy the parent span baggage to the current span baggage
     Baggage.Current = parentContext.Baggage;
 
+    // Write the baggage properties as span attributes so that they can be recorded by Jaeger
     foreach (var (key, value) in Baggage.Current)
     {
         span.SetAttribute(key, value);
@@ -68,8 +72,9 @@ async Task ProcessMessageAsync(ProcessMessageEventArgs args)
 
     var body = args.Message.Body.ToString();
     Console.WriteLine($"Received: {body}");
-    await args.CompleteMessageAsync(args.Message).ConfigureAwait(false);
+    await args.CompleteMessageAsync(args.Message);
 
+    // Record an event on the span
     span.AddEvent($"Message \"{body}\" received from queue");
 }
 

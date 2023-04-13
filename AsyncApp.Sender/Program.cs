@@ -10,9 +10,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Define attributes for your application
 var resourceBuilder = ResourceBuilder.CreateDefault()
-    // add attributes for the name and version of the service
+    // Add attributes for the name and version of the service
     .AddService("MyCompany.AsyncApp.Sender", serviceVersion: "1.0.0")
-    // add attributes for the OpenTelemetry SDK version
+    // Add attributes for the OpenTelemetry SDK version
     .AddTelemetrySdk();
 
 // Configure tracing
@@ -20,13 +20,13 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(tracerProviderBuilder =>
     {
         tracerProviderBuilder
-            // define the resource
+            // Define the resource
             .SetResourceBuilder(resourceBuilder)
-            // receive traces from our own custom sources
+            // Receive traces from our own custom sources
             .AddSource("Sender")
-            // ensures that all spans are recorded and sent to exporter
+            // Ensures that all spans are recorded and sent to exporter
             .SetSampler(new AlwaysOnSampler())
-            // stream traces to the SpanExporter
+            // Stream traces to the SpanExporter
             .AddProcessor(
                 new BatchActivityExportProcessor(new JaegerExporter(new()
                 {
@@ -36,28 +36,29 @@ builder.Services.AddOpenTelemetry()
 
 var app = builder.Build();
 
-await using ServiceBusClient client = new("<namespace-name>.servicebus.windows.net", new DefaultAzureCredential());
-await using var sender = client.CreateSender("<queue-name>");
+await using var client = new ServiceBusClient("asyncservice.servicebus.windows.net", new DefaultAzureCredential());
+await using var sender = client.CreateSender("messages");
 
 app.MapPost("/send", async (string message, TracerProvider tracerProvider) =>
 {
+    // Creates the root span
     var tracer = tracerProvider.GetTracer("Sender");
-    await SendMessageAsync(message, tracer, sender).ConfigureAwait(false);
+    await SendMessageAsync(message, tracer, sender);
     return Results.Accepted();
 });
 
-await app.RunAsync().ConfigureAwait(false);
+await app.RunAsync();
 
 static async Task SendMessageAsync(string message, Tracer tracer, ServiceBusSender sender)
 {
     using var span = tracer.StartActiveSpan("Send message", SpanKind.Producer);
 
-    // set contextual information which can be read by the receiver
+    // Set contextual information which can be read by the receiver
     Baggage.SetBaggage("Sent by", "AsyncApp.Sender");
 
     var qMessage = new ServiceBusMessage();
 
-    // add trace context to message properties
+    // Use the Propagator to add trace context to message properties
     Propagators.DefaultTextMapPropagator.Inject(new(span.Context, Baggage.Current), qMessage.ApplicationProperties,
         (qProps, key, value) =>
         {
@@ -66,7 +67,8 @@ static async Task SendMessageAsync(string message, Tracer tracer, ServiceBusSend
         });
 
     qMessage.Body = BinaryData.FromString(message);
-    await sender.SendMessageAsync(qMessage).ConfigureAwait(false);
+    await sender.SendMessageAsync(qMessage);
 
+    // Add an event to the span
     span.AddEvent($"Message \"{message}\" sent to queue");
 }
